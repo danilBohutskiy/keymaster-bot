@@ -14,17 +14,25 @@ const {
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 
-// Проверка на админа
 function isAdmin(ctx) {
   return ctx.from.id === ADMIN_ID;
 }
 
-// Создаем более информативное главное меню
 const mainMenu = Markup.keyboard([
   ['🔑 Текущий ключ', '📋 Список ключей'],
-  ['🔄 Смена ключа', '♻️ Сбросить всё'],
-  ['ℹ️ Детали', '📊 Статистика']
+  ['🔄 Смена ключа', '⚙️ Управление ключами'],
+  ['♻️ Сбросить всё', '📊 Статистика']
 ]).resize();
+
+const keyManagementMenu = Markup.keyboard([
+  ['➕ Добавить ключ', '🗑️ Удалить ключ'],
+  ['👁️ Просмотр ключа', '⬅️ Назад']
+]).resize();
+
+let userState = {};
+function clearUserState(userId) {
+  delete userState[userId];
+}
 
 /**
  * Отправка информации о текущем ключе
@@ -246,35 +254,16 @@ bot.on('callback_query', async (ctx) => {
     
     return;
   }
-  
-  if (data === 'back_to_details') {
-    await ctx.deleteMessage();
-    await ctx.reply("Возвращаемся к списку ключей...");
-    
-    // Вызываем обработчик кнопки "Детали"
-    const keys = await loadKeys();
-    if (!keys || keys.length === 0) {
-      return ctx.reply("Список ключей пуст");
-    }
-    
-    const names = keys.map(k => k.name);
-    const chunkSize = 3;
-    const keyboardButtons = [];
-    
-    for (let i = 0; i < names.length; i += chunkSize) {
-      keyboardButtons.push(names.slice(i, i + chunkSize).map(n => "🔍 " + n));
-    }
-
-    keyboardButtons.push(['⬅️ Назад']);
-
-    await ctx.reply("Выберите ключ для просмотра деталей:", Markup.keyboard(keyboardButtons).resize());
-    
-    return;
-  }
 
   if (data === 'back') {
     await ctx.deleteMessage();
     await ctx.reply("Главное меню:", mainMenu);
+    return;
+  }
+
+  if (data === 'back_to_management') {
+    await ctx.deleteMessage();
+    await ctx.reply("Управление ключами:", keyManagementMenu);
     return;
   }
 });
@@ -352,34 +341,6 @@ bot.hears('📊 Статистика', async (ctx) => {
 });
 
 /**
- * Обработчик кнопки "Детали"
- */
-bot.hears('ℹ️ Детали', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  try {
-    const keys = await loadKeys();
-    if (!keys || keys.length === 0) {
-      return ctx.reply("Список ключей пуст");
-    }
-    
-    const names = keys.map(k => k.name);
-    const chunkSize = 3;
-    const keyboardButtons = [];
-    
-    for (let i = 0; i < names.length; i += chunkSize) {
-      keyboardButtons.push(names.slice(i, i + chunkSize).map(n => "🔍 " + n));
-    }
-
-    keyboardButtons.push(['⬅️ Назад']);
-
-    await ctx.reply("Выберите ключ для просмотра деталей:", Markup.keyboard(keyboardButtons).resize());
-  } catch (error) {
-    console.error("Ошибка при получении деталей ключей:", error);
-    ctx.reply("⚠️ Произошла ошибка при получении деталей ключей.");
-  }
-});
-
-/**
  * Обработчик названия ключа (для деталей)
  */
 bot.hears(/^🔍 ([\w\d_-]+)$/, async (ctx) => {
@@ -443,41 +404,6 @@ bot.hears('🔄 Смена ключа', async (ctx) => {
 });
 
 /**
- * Обработчик выбора ключа для смены
- */
-bot.hears(/^🔄 ([\w\d_-]+)$/, async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  try {
-    const name = ctx.match[1];
-    const keys = await loadKeys();
-    const match = keys.find(k => k.name === name);
-    
-    if (!match) {
-      return ctx.reply("❌ Ключ не найден.");
-    }
-    
-    // Сбрасываем статус "текущий" у всех ключей
-    keys.forEach(k => k.current = false);
-    
-    // Устанавливаем выбранный ключ как текущий
-    match.current = true;
-    match.lastUsed = new Date().toISOString();
-    await saveKeys(keys);
-    
-    ctx.reply(`✅ Ключ *${name}* установлен как текущий.`, { 
-      parse_mode: "Markdown",
-      reply_markup: mainMenu
-    });
-    
-    // Показываем информацию о ключе
-    await sendActiveKeyInfo(ctx);
-  } catch (error) {
-    console.error("Ошибка при смене ключа:", error);
-    ctx.reply("⚠️ Произошла ошибка при смене ключа.");
-  }
-});
-
-/**
  * Обработчик кнопки "Назад"
  */
 bot.hears('⬅️ Назад', (ctx) => {
@@ -503,6 +429,291 @@ bot.hears('♻️ Сбросить всё', async (ctx) => {
     ctx.reply("⚠️ Произошла ошибка при сбросе ключей.");
   }
 });
+
+// Обработчик кнопки "Управление ключами"
+bot.hears('⚙️ Управление ключами', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.reply("Выберите действие:", keyManagementMenu);
+});
+
+// Обработчик кнопки "Добавить ключ"
+bot.hears('➕ Добавить ключ', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  userState[ctx.from.id] = { 
+    action: 'adding_key',
+    step: 'name'
+  };
+  
+  await ctx.reply(
+    "📝 Введите название ключа (например: key1, account2, api_key_1):",
+    Markup.keyboard([['❌ Отмена']]).resize()
+  );
+});
+
+// Обработчик кнопки "Удалить ключ"
+bot.hears('🗑️ Удалить ключ', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  try {
+    const keys = await loadKeys();
+    if (!keys || keys.length === 0) {
+      return ctx.reply("Список ключей пуст", keyManagementMenu);
+    }
+    
+    const names = keys.map(k => k.name);
+    const chunkSize = 3;
+    const keyboardButtons = [];
+    
+    for (let i = 0; i < names.length; i += chunkSize) {
+      keyboardButtons.push(names.slice(i, i + chunkSize).map(n => "🗑️ " + n));
+    }
+    
+    keyboardButtons.push(['❌ Отмена']);
+    
+    await ctx.reply("Выберите ключ для удаления:", Markup.keyboard(keyboardButtons).resize());
+  } catch (error) {
+    console.error("Ошибка при получении списка ключей:", error);
+    ctx.reply("⚠️ Произошла ошибка при получении списка ключей.");
+  }
+});
+
+// Обработчик кнопки "Просмотр ключа"
+bot.hears('👁️ Просмотр ключа', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  try {
+    const keys = await loadKeys();
+    if (!keys || keys.length === 0) {
+      return ctx.reply("Список ключей пуст", keyManagementMenu);
+    }
+    
+    const names = keys.map(k => k.name);
+    const chunkSize = 3;
+    const keyboardButtons = [];
+    
+    for (let i = 0; i < names.length; i += chunkSize) {
+      keyboardButtons.push(names.slice(i, i + chunkSize).map(n => "👁️ " + n));
+    }
+    
+    keyboardButtons.push(['❌ Отмена']);
+    
+    await ctx.reply("Выберите ключ для просмотра:", Markup.keyboard(keyboardButtons).resize());
+  } catch (error) {
+    console.error("Ошибка при получении списка ключей:", error);
+    ctx.reply("⚠️ Произошла ошибка при получении списка ключей.");
+  }
+});
+
+// Обработчик удаления ключа
+bot.hears(/^🗑️ ([\w\d_-]+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  try {
+    const keyName = ctx.match[1];
+    const keys = await loadKeys();
+    const keyIndex = keys.findIndex(k => k.name === keyName);
+    
+    if (keyIndex === -1) {
+      return ctx.reply("❌ Ключ не найден.", keyManagementMenu);
+    }
+    
+    // Удаляем ключ
+    keys.splice(keyIndex, 1);
+    await saveKeys(keys);
+    
+    await ctx.reply(`🗑️ Ключ *${keyName}* удален.`, { 
+      parse_mode: "Markdown",
+      reply_markup: keyManagementMenu
+    });
+    
+  } catch (error) {
+    console.error("Ошибка при удалении ключа:", error);
+    ctx.reply("⚠️ Произошла ошибка при удалении ключа.");
+  }
+});
+
+// Обработчик просмотра ключа
+bot.hears(/^👁️ ([\w\d_-]+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  try {
+    const keyName = ctx.match[1];
+    const keys = await loadKeys();
+    const info = getKeyInfo(keys, keyName);
+    
+    if (info) {
+      ctx.reply(info, { 
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Активировать", callback_data: `activate_${keyName}` },
+              { text: "🚫 Деактивировать", callback_data: `exhaust_${keyName}` }
+            ],
+            [{ text: "⬅️ Назад", callback_data: "back_to_management" }]
+          ]
+        }
+      });
+    } else {
+      ctx.reply("❌ Ключ не найден.", keyManagementMenu);
+    }
+  } catch (error) {
+    console.error("Ошибка при получении информации о ключе:", error);
+    ctx.reply("⚠️ Произошла ошибка при получении информации о ключе.");
+  }
+});
+
+// Обработчик кнопки "Отмена"
+bot.hears('❌ Отмена', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  clearUserState(ctx.from.id);
+  await ctx.reply("Операция отменена.", keyManagementMenu);
+});
+
+// Обработчик текстовых сообщений для добавления ключа
+bot.on('text', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  const userId = ctx.from.id;
+  const state = userState[userId];
+  
+  if (!state || state.action !== 'adding_key') return;
+  
+  try {
+    const text = ctx.message.text.trim();
+    
+    if (state.step === 'name') {
+      // Проверяем корректность названия
+      if (!/^[\w\d_-]+$/.test(text)) {
+        return ctx.reply("❌ Название может содержать только буквы, цифры, дефисы и подчеркивания. Попробуйте снова:");
+      }
+      
+      // Проверяем, не существует ли уже такой ключ
+      const keys = await loadKeys();
+      if (keys.find(k => k.name === text)) {
+        return ctx.reply("❌ Ключ с таким названием уже существует. Введите другое название:");
+      }
+      
+      state.keyData = { name: text };
+      state.step = 'value';
+      
+      await ctx.reply("🔑 Теперь введите значение ключа (API key, токен и т.д.):");
+      
+    } else if (state.step === 'value') {
+      state.keyData.value = text;
+      state.step = 'email';
+      
+      await ctx.reply(
+        "📧 Введите email для этого ключа (или отправьте 'пропустить' если не нужно):",
+        Markup.keyboard([['⏭️ Пропустить', '❌ Отмена']]).resize()
+      );
+      
+    } else if (state.step === 'email') {
+      if (text.toLowerCase() !== 'пропустить') {
+        state.keyData.email = text;
+      }
+      state.step = 'password';
+      
+      await ctx.reply(
+        "🔐 Введите пароль для этого ключа (или отправьте 'пропустить' если не нужно):",
+        Markup.keyboard([['⏭️ Пропустить', '❌ Отмена']]).resize()
+      );
+      
+    } else if (state.step === 'password') {
+      if (text.toLowerCase() !== 'пропустить') {
+        state.keyData.password = text;
+      }
+      
+      // Сохраняем ключ
+      const keys = await loadKeys();
+      const newKey = {
+        name: state.keyData.name,
+        value: state.keyData.value,
+        active: true,
+        current: keys.length === 0, // Первый ключ делаем текущим
+        exhausted: false,
+        lastUsed: null,
+        email: state.keyData.email || null,
+        password: state.keyData.password || null
+      };
+      
+      keys.push(newKey);
+      await saveKeys(keys);
+      
+      clearUserState(userId);
+      
+      let successMessage = `✅ Ключ *${newKey.name}* успешно добавлен!\n\n`;
+      successMessage += `🔑 *Значение:* \`${newKey.value}\`\n`;
+      if (newKey.email) successMessage += `📧 *Email:* ${newKey.email}\n`;
+      if (newKey.password) successMessage += `🔐 *Пароль:* ${newKey.password}\n`;
+      
+      await ctx.reply(successMessage, { 
+        parse_mode: "Markdown",
+        reply_markup: keyManagementMenu
+      });
+    }
+    
+  } catch (error) {
+    console.error("Ошибка при добавлении ключа:", error);
+    clearUserState(userId);
+    ctx.reply("⚠️ Произошла ошибка при добавлении ключа.", keyManagementMenu);
+  }
+});
+
+// Обработчик кнопки "Пропустить"
+bot.hears('⏭️ Пропустить', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  
+  const userId = ctx.from.id;
+  const state = userState[userId];
+  
+  if (!state || state.action !== 'adding_key') return;
+  
+  if (state.step === 'email') {
+    state.step = 'password';
+    await ctx.reply(
+      "🔐 Введите пароль для этого ключа (или отправьте 'пропустить' если не нужно):",
+      Markup.keyboard([['⏭️ Пропустить', '❌ Отмена']]).resize()
+    );
+  } else if (state.step === 'password') {
+    // Сохраняем ключ без пароля
+    try {
+      const keys = await loadKeys();
+      const newKey = {
+        name: state.keyData.name,
+        value: state.keyData.value,
+        active: true,
+        current: keys.length === 0,
+        exhausted: false,
+        lastUsed: null,
+        email: state.keyData.email || null,
+        password: null
+      };
+      
+      keys.push(newKey);
+      await saveKeys(keys);
+      
+      clearUserState(userId);
+      
+      let successMessage = `✅ Ключ *${newKey.name}* успешно добавлен!\n\n`;
+      successMessage += `🔑 *Значение:* \`${newKey.value}\`\n`;
+      if (newKey.email) successMessage += `📧 *Email:* ${newKey.email}\n`;
+      
+      await ctx.reply(successMessage, { 
+        parse_mode: "Markdown",
+        reply_markup: keyManagementMenu
+      });
+      
+    } catch (error) {
+      console.error("Ошибка при добавлении ключа:", error);
+      clearUserState(userId);
+      ctx.reply("⚠️ Произошла ошибка при добавлении ключа.", keyManagementMenu);
+    }
+  }
+});
+
 
 /**
  * Обработчик ошибок
